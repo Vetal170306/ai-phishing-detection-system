@@ -1,0 +1,104 @@
+{
+  "model_name": "PhiUSIIL-URL-Detector",
+  "version": "v1.0.0",
+  "champion_algorithm": "HistGradientBoosting Classifier",
+  "timestamp": "2026-09-24 22:20:00",
+  "features": [
+    "url_length",
+    "domain_length",
+    "subdomain_count",
+    "dot_count",
+    "hyphen_count",
+    "digit_count",
+    "special_character_count",
+    "has_ip",
+    "has_https",
+    "has_at_symbol",
+    "suspicious_keyword_count",
+    "url_shortener_detected",
+    "parameter_count",
+    "path_segment_count",
+    "domain_entropy",
+    "digit_ratio",
+    "letter_ratio",
+    "has_double_slash_in_path",
+    "tld_length"
+  ],
+  "feature_importances": {
+    "has_https": 0.2393,
+    "subdomain_count": 0.2078,
+    "dot_count": 0.1047,
+    "path_segment_count": 0.0703,
+    "url_length": 0.0618,
+    "digit_count": 0.0292,
+    "special_character_count": 0.0132,
+    "tld_length": 0.002,
+    "domain_length": 0.0007,
+    "hyphen_count": 0.0005,
+    "suspicious_keyword_count": 0.0003,
+    "letter_ratio": -0.0003,
+    "has_ip": 0.0,
+    "has_at_symbol": 0.0,
+    "url_shortener_detected": 0.0,
+    "parameter_count": 0.0,
+    "domain_entropy": 0.0,
+    "digit_ratio": 0.0,
+    "has_double_slash_in_path": 0.0
+  },
+  "benchmarks": {
+    "Random Forest Classifier": {
+      "accuracy": 0.9957,
+      "precision": 0.9986,
+      "recall": 0.9928,
+      "f1_score": 0.9957,
+      "roc_auc": 0.9974,
+      "fit_time_seconds": 0.43,
+      "confusion_matrix": [
+        [
+          9986,
+          14
+        ],
+        [
+          72,
+          9928
+        ]
+      ]
+    },
+    "HistGradientBoosting Classifier": {
+      "accuracy": 0.9961,
+      "precision": 0.9997,
+      "recall": 0.9925,
+      "f1_score": 0.9961,
+      "roc_auc": 0.9973,
+      "fit_time_seconds": 0.34,
+      "confusion_matrix": [
+        [
+          9997,
+          3
+        ],
+        [
+          75,
+          9925
+        ]
+      ]
+    },
+    "Logistic Regression (Standardized)": {
+      "accuracy": 0.9957,
+      "precision": 0.9997,
+      "recall": 0.9916,
+      "f1_score": 0.9956,
+      "roc_auc": 0.9971,
+      "fit_time_seconds": 0.08,
+      "confusion_matrix": [
+        [
+          9997,
+          3
+        ],
+        [
+          84,
+          9916
+        ]
+      ]
+    }
+  }
+}

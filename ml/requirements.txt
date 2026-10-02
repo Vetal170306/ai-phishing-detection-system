@@ -1,0 +1,9 @@
+# Machine Learning Pipeline Dependencies
+# Pinning scikit-learn and joblib for deterministic model serialization
+scikit-learn==1.9.1
+joblib==1.6.0
+numpy>=2.0.0
+pandas>=2.2.0
+scipy>=1.15.0
+pytest>=8.0.0
+
