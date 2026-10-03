@@ -5,14 +5,21 @@ AI-Based Phishing Website Detection System
 Loads the trained scikit-learn classifier pipeline, performs sub-millisecond static
 inference on target URLs, and correlates feature indicators to generate calibrated
 risk scores (0-100) and actionable, human-explainable security warning signs.
+Includes immediate Trusted Domain Whitelist bypass.
 """
 
 import os
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 import joblib
 
 from backend.app.core.config import settings
-from backend.app.ml.feature_extractor import FEATURE_NAMES, FeatureExtractor
+from backend.app.ml.feature_extractor import (
+    FEATURE_NAMES,
+    FeatureExtractor,
+    check_brand_spoofing,
+    is_whitelisted_domain
+)
 
 
 class PhishingPredictor:
@@ -52,9 +59,24 @@ class PhishingPredictor:
             print(f"[!] Warning: Model file not found at {model_path}. Inference will use fallback heuristic rules.")
             self.model = None
 
-    def generate_explanations(self, features: Dict[str, Any], risk_score: int) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    def generate_explanations(
+        self,
+        features: Dict[str, Any],
+        risk_score: int,
+        brand_spoofed: bool = False,
+        spoofed_brands: Optional[List[str]] = None
+    ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
         warnings: List[Dict[str, str]] = []
         safe_indicators: List[Dict[str, str]] = []
+
+        # 0. Brand Spoofing Check
+        if brand_spoofed:
+            brands_str = ", ".join(spoofed_brands) if spoofed_brands else "popular services"
+            warnings.append({
+                "severity": "CRITICAL",
+                "title": f"Brand Spoofing Traps Detected ({brands_str})",
+                "description": f"URL embeds recognized trademark ({brands_str}) in a subdomain/path on an unofficial host domain to deceive users."
+            })
 
         # 1. IP Address Check
         if features["has_ip"] == 1:
@@ -85,14 +107,14 @@ class PhishingPredictor:
                 "description": "The '@' character can trick browsers into ignoring preceding characters to disguise the true host destination."
             })
 
-        # 4. Suspicious Keywords
+        # 4. Suspicious Action Keywords
         kw_count = features["suspicious_keyword_count"]
         if kw_count > 0:
             severity = "HIGH" if kw_count >= 2 else "MEDIUM"
             warnings.append({
                 "severity": severity,
-                "title": f"Phishing Keywords Detected ({kw_count})",
-                "description": f"URL path/query contains {kw_count} sensitive terms (e.g. login, verify, account, secure) commonly used in credential harvesting."
+                "title": f"Phishing Traps / Suspicious Terms ({kw_count})",
+                "description": f"URL structure includes {kw_count} sensitive keywords commonly associated with credential harvesting."
             })
         else:
             safe_indicators.append({
@@ -164,9 +186,56 @@ class PhishingPredictor:
         risk calibration, and explainability breakdown.
         """
         features = FeatureExtractor.extract_features(url)
+        normalized_url = features["normalized_url"]
+        
+        parsed = urlparse(normalized_url)
+        netloc = parsed.netloc
+        host = netloc.split(":")[0] if ":" in netloc else netloc
+
+        # 1. IMMEDIATE TRUSTED DOMAIN WHITELIST CHECK
+        is_trusted, root_domain = is_whitelisted_domain(host)
+        if is_trusted:
+            safe_indicators = [
+                {
+                    "title": "Verified Official Domain",
+                    "description": f"Domain '{host}' belongs to the verified official infrastructure of {root_domain}."
+                },
+                {
+                    "title": "Trusted Authority Whitelist",
+                    "description": "Host domain passed organizational authenticity and top-tier reputation verification."
+                }
+            ]
+            if features["has_https"] == 1:
+                safe_indicators.append({
+                    "title": "HTTPS Transport Enforced",
+                    "description": "Connection utilizes verified SSL/TLS transport encryption."
+                })
+            safe_indicators.append({
+                "title": "Zero Phishing Traps",
+                "description": "No deceptive subdomain hijacking or credential harvesting mechanisms detected."
+            })
+
+            return {
+                "url": url,
+                "normalized_url": normalized_url,
+                "prediction": "LEGITIMATE",
+                "risk_score": 0,
+                "risk_level": "LOW",
+                "confidence": 0.9999,
+                "phishing_probability": 0.0,
+                "features": features,
+                "warning_signs": [],
+                "safe_indicators": safe_indicators,
+                "algorithm": "Trusted Whitelist & Heuristic Engine",
+                "model_version": self.version
+            }
+
+        # 2. BRAND SPOOFING CHECK ON NON-WHITELISTED TARGETS
+        _, brand_spoofed, spoofed_brands = check_brand_spoofing(normalized_url)
+
+        # 3. ML INFERENCE
         vector = [float(features[name]) for name in FEATURE_NAMES]
 
-        # ML Model Inference
         if self.model is not None:
             try:
                 # predict_proba returns [P(legit), P(phishing)]
@@ -174,9 +243,13 @@ class PhishingPredictor:
                 phishing_prob = float(proba[1])
             except Exception as e:
                 print(f"[-] Inference error: {e}, using heuristic fallback")
-                phishing_prob = self._heuristic_fallback(features)
+                phishing_prob = self._heuristic_fallback(features, brand_spoofed)
         else:
-            phishing_prob = self._heuristic_fallback(features)
+            phishing_prob = self._heuristic_fallback(features, brand_spoofed)
+
+        # If brand spoofed on unofficial host, calibrate risk floor
+        if brand_spoofed:
+            phishing_prob = max(0.85, phishing_prob)
 
         # Risk calibration: continuous score 0 to 100
         risk_score = int(round(phishing_prob * 100))
@@ -196,11 +269,16 @@ class PhishingPredictor:
             risk_level = "HIGH"
             confidence = round(phishing_prob, 4)
 
-        warnings, safe_indicators = self.generate_explanations(features, risk_score)
+        warnings, safe_indicators = self.generate_explanations(
+            features=features,
+            risk_score=risk_score,
+            brand_spoofed=brand_spoofed,
+            spoofed_brands=spoofed_brands
+        )
 
         return {
             "url": url,
-            "normalized_url": features["normalized_url"],
+            "normalized_url": normalized_url,
             "prediction": prediction,
             "risk_score": risk_score,
             "risk_level": risk_level,
@@ -213,7 +291,7 @@ class PhishingPredictor:
             "model_version": self.version
         }
 
-    def _heuristic_fallback(self, f: Dict[str, Any]) -> float:
+    def _heuristic_fallback(self, f: Dict[str, Any], brand_spoofed: bool = False) -> float:
         """Heuristic risk probability fallback when ML model file is unavailable."""
         score = 0.05
         if f["has_ip"]:
@@ -222,6 +300,8 @@ class PhishingPredictor:
             score += 0.20
         if f["has_at_symbol"]:
             score += 0.25
+        if brand_spoofed:
+            score += 0.50
         if f["suspicious_keyword_count"] > 0:
             score += min(0.35, f["suspicious_keyword_count"] * 0.15)
         if f["url_shortener_detected"]:

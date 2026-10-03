@@ -4,28 +4,75 @@ AI-Based Phishing Website Detection System
 
 Performs strictly static lexical, structural, and domain-level feature extraction
 directly from a URL string without sending any outbound HTTP or network requests.
+Includes domain whitelisting and brand spoofing awareness.
 """
 
 import math
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
 # Common URL shortener domains
-SHORTENER_DOMAINS = {
+SHORTENER_DOMAINS: Set[str] = {
     "bit.ly", "tinyurl.com", "goo.gl", "ow.ly", "t.co", "is.gd",
     "buff.ly", "adf.ly", "tiny.cc", "lnkd.in", "db.tt", "qr.ae",
     "cur.lv", "ity.im", "q.gs", "po.st", "bc.vc", "twitthis.com",
     "u.to", "j.mp", "buzurl.com", "cutt.ly", "rebrand.ly", "shorturl.at"
 }
 
-# Suspicious keywords commonly seen in phishing attack URLs
-SUSPICIOUS_KEYWORDS = [
+# Trusted Top Legitimate Domains Whitelist
+TOP_LEGITIMATE_DOMAINS: Set[str] = {
+    # Tech & Search
+    "google.com", "microsoft.com", "github.com", "apple.com", "amazon.com", "netflix.com", "youtube.com",
+    "live.com", "office.com", "outlook.com", "bing.com", "azure.com", "msn.com",
+    "gmail.com", "google.co.in", "google.co.uk", "google.de", "github.io", "gitlab.com", "bitbucket.org",
+    "icloud.com", "amazon.co.uk", "amazon.in", "amazon.de", "aws.amazon.com",
+    # Social Media
+    "facebook.com", "instagram.com", "linkedin.com", "x.com", "twitter.com", "whatsapp.com", "meta.com",
+    # Payment & Banks
+    "paypal.com", "paypal.me", "stripe.com", "visa.com", "mastercard.com",
+    "chase.com", "bankofamerica.com", "wellsfargo.com", "citi.com",
+    # Reference, Productivity & Infrastructure
+    "wikipedia.org", "wikimedia.org",
+    "adobe.com", "spotify.com", "dropbox.com", "salesforce.com",
+    "cloudflare.com", "stackoverflow.com", "reddit.com", "medium.com",
+    "openai.com", "anthropic.com", "cnn.com", "bbc.com", "nytimes.com"
+}
+
+# Brand name to official domain mapping for targeted spoofing detection
+BRAND_OFFICIAL_DOMAINS: Dict[str, Set[str]] = {
+    "microsoft": {"microsoft.com", "live.com", "office.com", "outlook.com", "bing.com", "azure.com", "msn.com"},
+    "google": {"google.com", "youtube.com", "gmail.com"},
+    "apple": {"apple.com", "icloud.com"},
+    "appleid": {"apple.com", "icloud.com"},
+    "amazon": {"amazon.com", "aws.amazon.com"},
+    "netflix": {"netflix.com"},
+    "paypal": {"paypal.com", "paypal.me"},
+    "stripe": {"stripe.com"},
+    "visa": {"visa.com"},
+    "mastercard": {"mastercard.com"},
+    "facebook": {"facebook.com", "meta.com"},
+    "instagram": {"instagram.com"},
+    "linkedin": {"linkedin.com"},
+    "whatsapp": {"whatsapp.com"},
+    "twitter": {"twitter.com", "x.com"},
+    "chase": {"chase.com"},
+    "wellsfargo": {"wellsfargo.com"},
+    "wells": {"wellsfargo.com"},
+    "fargo": {"wellsfargo.com"},
+    "github": {"github.com", "github.io"},
+    "adobe": {"adobe.com"},
+    "dropbox": {"dropbox.com"},
+    "spotify": {"spotify.com"},
+    "ebay": {"ebay.com", "ebayisapi.com"}
+}
+
+# Generic suspicious keywords commonly seen in credential harvesting
+GENERIC_SUSPICIOUS_KEYWORDS: List[str] = [
     "login", "signin", "verify", "verification", "account", "update",
     "secure", "banking", "authenticate", "confirm", "wallet", "password",
     "credential", "suspend", "unlock", "recover", "validate", "support",
-    "paypal", "appleid", "netflix", "microsoft", "amazon", "chase",
-    "wells", "fargo", "security", "webscr", "ebayisapi", "cmd=_login"
+    "webscr", "ebayisapi", "cmd=_login"
 ]
 
 # IPv4 address regex pattern
@@ -34,7 +81,7 @@ IPV4_PATTERN = re.compile(
 )
 
 # Feature names in the exact order expected by the ML model
-FEATURE_NAMES = [
+FEATURE_NAMES: List[str] = [
     "url_length",
     "domain_length",
     "subdomain_count",
@@ -97,6 +144,64 @@ def calculate_entropy(text: str) -> float:
     return round(entropy, 4)
 
 
+def is_whitelisted_domain(host: str) -> Tuple[bool, str]:
+    """
+    Checks if a hostname belongs to a verified trusted domain or official authority.
+    Handles exact domain matches, official subdomains (e.g. login.microsoft.com),
+    and verified institutional TLDs (.gov, .edu, .mil).
+    """
+    if not host:
+        return False, ""
+    
+    clean_host = host.lower().strip()
+    if clean_host.startswith("www."):
+        clean_host = clean_host[4:]
+        
+    # Check exact match in trusted whitelist
+    if clean_host in TOP_LEGITIMATE_DOMAINS:
+        return True, clean_host
+        
+    # Check subdomains of whitelisted domains (e.g. login.microsoft.com, docs.github.com)
+    for domain in TOP_LEGITIMATE_DOMAINS:
+        if clean_host.endswith("." + domain):
+            return True, domain
+            
+    # Check trusted institutional TLDs (.gov, .edu, .mil)
+    trusted_tlds = (".gov", ".edu", ".mil", ".gov.uk", ".gov.in", ".edu.in", ".ac.uk")
+    for tld in trusted_tlds:
+        if clean_host.endswith(tld):
+            return True, clean_host
+            
+    return False, ""
+
+
+def check_brand_spoofing(normalized_url: str) -> Tuple[int, bool, List[str]]:
+    """
+    Detects if recognized brand trademarks appear in subdomains, path, or query
+    on an unofficial host domain.
+    """
+    parsed = urlparse(normalized_url)
+    netloc = parsed.netloc
+    host = netloc.split(":")[0] if ":" in netloc else netloc
+    domain_core = host[4:] if host.startswith("www.") else host
+    
+    lower_url = normalized_url.lower()
+    brand_spoof_count = 0
+    detected_brands: List[str] = []
+    
+    for brand, official_hosts in BRAND_OFFICIAL_DOMAINS.items():
+        if brand in lower_url:
+            is_official = any(
+                domain_core == off or domain_core.endswith("." + off)
+                for off in official_hosts
+            )
+            if not is_official:
+                brand_spoof_count += 1
+                detected_brands.append(brand)
+                
+    return brand_spoof_count, len(detected_brands) > 0, detected_brands
+
+
 class FeatureExtractor:
     """
     Extracts numerical and categorical static features from URLs for machine learning inference
@@ -148,8 +253,16 @@ class FeatureExtractor:
         has_https = 1 if parsed.scheme == "https" else 0
         has_at_symbol = 1 if "@" in normalized else 0
         
+        # Smart Brand & Suspicious Keyword Extraction
         lower_url = normalized.lower()
-        suspicious_keyword_count = sum(1 for kw in SUSPICIOUS_KEYWORDS if kw in lower_url)
+        
+        # 1. Generic credential action keywords
+        generic_kw_count = sum(1 for kw in GENERIC_SUSPICIOUS_KEYWORDS if kw in lower_url)
+        
+        # 2. Brand Spoofing Check (only flags if brand is on an UNOFFICIAL host)
+        brand_spoof_count, _, _ = check_brand_spoofing(normalized)
+                    
+        suspicious_keyword_count = generic_kw_count + brand_spoof_count
         
         url_shortener_detected = 1 if (host in SHORTENER_DOMAINS or domain_core in SHORTENER_DOMAINS) else 0
         

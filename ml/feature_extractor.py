@@ -8,24 +8,64 @@ directly from a URL string without sending any outbound HTTP or network requests
 
 import math
 import re
-from typing import Any, Dict, List, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from typing import Any, Dict, List, Set, Tuple
+from urllib.parse import parse_qs, urlparse
 
 # Common URL shortener domains
-SHORTENER_DOMAINS = {
+SHORTENER_DOMAINS: Set[str] = {
     "bit.ly", "tinyurl.com", "goo.gl", "ow.ly", "t.co", "is.gd",
     "buff.ly", "adf.ly", "tiny.cc", "lnkd.in", "db.tt", "qr.ae",
     "cur.lv", "ity.im", "q.gs", "po.st", "bc.vc", "twitthis.com",
     "u.to", "j.mp", "buzurl.com", "cutt.ly", "rebrand.ly", "shorturl.at"
 }
 
-# Suspicious keywords commonly seen in phishing attack URLs
-SUSPICIOUS_KEYWORDS = [
+# Trusted Top Legitimate Domains Whitelist
+TOP_LEGITIMATE_DOMAINS: Set[str] = {
+    "microsoft.com", "live.com", "office.com", "outlook.com", "bing.com", "azure.com", "msn.com",
+    "google.com", "youtube.com", "gmail.com", "google.co.in", "google.co.uk", "google.de",
+    "github.com", "github.io", "gitlab.com", "bitbucket.org",
+    "apple.com", "icloud.com",
+    "amazon.com", "amazon.co.uk", "amazon.in", "amazon.de", "aws.amazon.com",
+    "netflix.com",
+    "paypal.com", "paypal.me",
+    "facebook.com", "meta.com", "instagram.com", "whatsapp.com",
+    "twitter.com", "x.com", "linkedin.com",
+    "chase.com", "bankofamerica.com", "wellsfargo.com", "citi.com",
+    "wikipedia.org", "wikimedia.org",
+    "adobe.com", "spotify.com", "dropbox.com", "salesforce.com",
+    "cloudflare.com", "stackoverflow.com", "reddit.com", "medium.com",
+    "openai.com", "anthropic.com", "stripe.com", "cnn.com", "bbc.com", "nytimes.com"
+}
+
+# Brand name to official domain mapping for targeted spoofing detection
+BRAND_OFFICIAL_DOMAINS: Dict[str, Set[str]] = {
+    "microsoft": {"microsoft.com", "live.com", "office.com", "outlook.com", "bing.com", "azure.com", "msn.com"},
+    "google": {"google.com", "youtube.com", "gmail.com"},
+    "apple": {"apple.com", "icloud.com"},
+    "appleid": {"apple.com", "icloud.com"},
+    "amazon": {"amazon.com", "aws.amazon.com"},
+    "netflix": {"netflix.com"},
+    "paypal": {"paypal.com", "paypal.me"},
+    "chase": {"chase.com"},
+    "wellsfargo": {"wellsfargo.com"},
+    "wells": {"wellsfargo.com"},
+    "fargo": {"wellsfargo.com"},
+    "github": {"github.com", "github.io"},
+    "facebook": {"facebook.com", "meta.com"},
+    "instagram": {"instagram.com"},
+    "linkedin": {"linkedin.com"},
+    "adobe": {"adobe.com"},
+    "dropbox": {"dropbox.com"},
+    "spotify": {"spotify.com"},
+    "ebay": {"ebay.com", "ebayisapi.com"}
+}
+
+# Generic suspicious keywords commonly seen in credential harvesting
+GENERIC_SUSPICIOUS_KEYWORDS: List[str] = [
     "login", "signin", "verify", "verification", "account", "update",
     "secure", "banking", "authenticate", "confirm", "wallet", "password",
     "credential", "suspend", "unlock", "recover", "validate", "support",
-    "paypal", "appleid", "netflix", "microsoft", "amazon", "chase",
-    "wells", "fargo", "security", "webscr", "ebayisapi", "cmd=_login"
+    "webscr", "ebayisapi", "cmd=_login"
 ]
 
 # IPv4 address regex pattern
@@ -34,7 +74,7 @@ IPV4_PATTERN = re.compile(
 )
 
 # Feature names in the exact order expected by the ML model
-FEATURE_NAMES = [
+FEATURE_NAMES: List[str] = [
     "url_length",
     "domain_length",
     "subdomain_count",
@@ -66,20 +106,14 @@ def normalize_url(url: str) -> str:
         return ""
     
     clean_url = url.strip()
-    
-    # Prepend scheme if missing (e.g. 'paypal-update.com/login' -> 'http://paypal-update.com/login')
     if not (clean_url.lower().startswith("http://") or clean_url.lower().startswith("https://")):
         clean_url = "http://" + clean_url
         
     try:
         parsed = urlparse(clean_url)
-        # Normalize scheme and netloc to lowercase
         scheme = parsed.scheme.lower()
         netloc = parsed.netloc.lower()
-        # Keep path, query, fragment
-        path = parsed.path
-        if not path:
-            path = "/"
+        path = parsed.path if parsed.path else "/"
         query = f"?{parsed.query}" if parsed.query else ""
         fragment = f"#{parsed.fragment}" if parsed.fragment else ""
         return f"{scheme}://{netloc}{path}{query}{fragment}"
@@ -88,10 +122,7 @@ def normalize_url(url: str) -> str:
 
 
 def calculate_entropy(text: str) -> float:
-    """
-    Calculates the Shannon entropy of a given string.
-    High entropy typically correlates with algorithmic domain generation (DGA) or obfuscation.
-    """
+    """Calculates the Shannon entropy of a given string."""
     if not text:
         return 0.0
     text_len = len(text)
@@ -106,6 +137,34 @@ def calculate_entropy(text: str) -> float:
     return round(entropy, 4)
 
 
+def is_whitelisted_domain(host: str) -> Tuple[bool, str]:
+    """
+    Checks if a hostname belongs to a verified trusted domain or official authority.
+    Handles exact domain matches, official subdomains (e.g. login.microsoft.com),
+    and verified institutional TLDs (.gov, .edu, .mil).
+    """
+    if not host:
+        return False, ""
+    
+    clean_host = host.lower().strip()
+    if clean_host.startswith("www."):
+        clean_host = clean_host[4:]
+        
+    if clean_host in TOP_LEGITIMATE_DOMAINS:
+        return True, clean_host
+        
+    for domain in TOP_LEGITIMATE_DOMAINS:
+        if clean_host.endswith("." + domain):
+            return True, domain
+            
+    trusted_tlds = (".gov", ".edu", ".mil", ".gov.uk", ".gov.in", ".edu.in", ".ac.uk")
+    for tld in trusted_tlds:
+        if clean_host.endswith(tld):
+            return True, clean_host
+            
+    return False, ""
+
+
 class FeatureExtractor:
     """
     Extracts numerical and categorical static features from URLs for machine learning inference
@@ -117,31 +176,20 @@ class FeatureExtractor:
         normalized = normalize_url(raw_url)
         parsed = urlparse(normalized)
         
-        # Domain parsing
         netloc = parsed.netloc
-        # Extract host without port
         host = netloc.split(":")[0] if ":" in netloc else netloc
-        # Remove leading 'www.' if present for clean domain metrics
         domain_core = host[4:] if host.startswith("www.") else host
         
-        # 1. URL Length
         url_length = len(normalized)
-        
-        # 2. Domain Length
         domain_length = len(host)
         
-        # 9. Has IP Address (IPv4 detection)
         has_ip = 1 if bool(IPV4_PATTERN.match(host)) else 0
         
-        # 3. Subdomain Count
-        # Count periods in host, minus top-level domain and main domain
         host_parts = host.split(".")
         if has_ip:
             subdomain_count = 0
             tld_length = 0
         elif len(host_parts) > 2:
-            # e.g., 'a.b.example.com' has 2 subdomains
-            # Filter out 'www' if present
             subdomain_parts = [p for p in host_parts[:-2] if p != "www"]
             subdomain_count = max(0, len(subdomain_parts))
             tld = host_parts[-1]
@@ -151,50 +199,48 @@ class FeatureExtractor:
             tld = host_parts[-1] if len(host_parts) > 1 else ""
             tld_length = len(tld)
             
-        # 4. Dot Count
         dot_count = normalized.count(".")
-        
-        # 5. Hyphen Count
         hyphen_count = normalized.count("-")
         
-        # 6. Digit Count & Digit Ratio
         digit_count = sum(c.isdigit() for c in normalized)
         digit_ratio = round(digit_count / url_length, 4) if url_length > 0 else 0.0
         
-        # 7. Letter Count & Letter Ratio
         letter_count = sum(c.isalpha() for c in normalized)
         letter_ratio = round(letter_count / url_length, 4) if url_length > 0 else 0.0
         
-        # 8. Special Character Count
-        # Characters other than alphanumeric, :, /, ?, =, &, ., -
         standard_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/?=.&-")
         special_character_count = sum(1 for c in normalized if c not in standard_chars)
         
-        # 10. Has HTTPS
         has_https = 1 if parsed.scheme == "https" else 0
-        
-        # 11. Has At Symbol (@) in URL (can be used to obscure credentials/host)
         has_at_symbol = 1 if "@" in normalized else 0
         
-        # 12. Suspicious Keyword Count
         lower_url = normalized.lower()
-        suspicious_keyword_count = sum(1 for kw in SUSPICIOUS_KEYWORDS if kw in lower_url)
+        generic_kw_count = sum(1 for kw in GENERIC_SUSPICIOUS_KEYWORDS if kw in lower_url)
         
-        # 13. URL Shortener Detected
+        brand_spoof_count = 0
+        brand_spoof_detected = False
+        for brand, official_hosts in BRAND_OFFICIAL_DOMAINS.items():
+            if brand in lower_url:
+                is_official = False
+                for official_host in official_hosts:
+                    if domain_core == official_host or domain_core.endswith("." + official_host):
+                        is_official = True
+                        break
+                if not is_official:
+                    brand_spoof_count += 1
+                    brand_spoof_detected = True
+                    
+        suspicious_keyword_count = generic_kw_count + brand_spoof_count
+        
         url_shortener_detected = 1 if (host in SHORTENER_DOMAINS or domain_core in SHORTENER_DOMAINS) else 0
         
-        # 14. Parameter Count
         query_params = parse_qs(parsed.query)
         parameter_count = len(query_params)
         
-        # 15. Path Segment Count
         path_segments = [seg for seg in parsed.path.split("/") if seg]
         path_segment_count = len(path_segments)
         
-        # 16. Domain Entropy
         domain_entropy = calculate_entropy(domain_core)
-        
-        # 17. Has Double Slash in Path (// trick for redirection)
         has_double_slash_in_path = 1 if "//" in parsed.path else 0
         
         return {
@@ -210,6 +256,7 @@ class FeatureExtractor:
             "has_https": has_https,
             "has_at_symbol": has_at_symbol,
             "suspicious_keyword_count": suspicious_keyword_count,
+            "brand_spoof_detected": brand_spoof_detected,
             "url_shortener_detected": url_shortener_detected,
             "parameter_count": parameter_count,
             "path_segment_count": path_segment_count,
@@ -222,8 +269,5 @@ class FeatureExtractor:
 
     @staticmethod
     def extract_vector(raw_url: str) -> List[float]:
-        """
-        Extracts features and returns an ordered numerical vector matching FEATURE_NAMES.
-        """
         feats = FeatureExtractor.extract_features(raw_url)
         return [float(feats[name]) for name in FEATURE_NAMES]
